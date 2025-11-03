@@ -1,0 +1,443 @@
+// bot.js - Fantasy Pet League Discord Bot & Points Manager
+// This bot runs 24/7, checks for adopted pets hourly, and awards points
+
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const PointsManager = require('./lib/PointsManager');
+const Database = require('./lib/Database');
+const StateManager = require('./lib/StateManager');
+const CommandHandler = require('./lib/CommandHandler');
+require('dotenv').config();
+
+// ============ CONFIGURATION ============
+
+const CHECK_INTERVAL = process.env.CHECK_INTERVAL || 60; // minutes
+const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DEFAULT_NOTIFICATION_CHANNEL = process.env.DEFAULT_CHANNEL_ID;
+
+// ============ INITIALIZATION ============
+
+const bot = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
+  ]
+});
+
+const db = new Database();
+const state = new StateManager();
+const points = new PointsManager(db, state);
+const commands = new CommandHandler(bot, db);
+
+// Channel configurations (which leagues to track per channel)
+const channelConfigs = new Map(); // channelId -> { leagueId, leagueName }
+
+// ============ BOT EVENTS ============
+
+bot.on('ready', async () => {
+  console.log(`✅ Bot logged in as ${bot.user.tag}`);
+  console.log(`⏰ Check interval: ${CHECK_INTERVAL} minutes`);
+  
+  // Set bot status
+  bot.user.setActivity('pets get adopted 🐾', { type: 'WATCHING' });
+  
+  // Initialize database connection
+  await db.connect();
+  console.log('✅ Database connected');
+  
+  // Load saved state
+  await state.load();
+  console.log('✅ State loaded');
+  
+  // Load channel configurations
+  await loadChannelConfigs();
+  
+  // Start the hourly check cycle
+  startCheckCycle();
+  
+  // Run initial check after 10 seconds
+  setTimeout(runCheck, 10000);
+});
+
+bot.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.content.startsWith('!')) return;
+  
+  const args = message.content.slice(1).trim().split(/ +/);
+  const command = args.shift().toLowerCase();
+  
+  try {
+    switch(command) {
+      case 'setleague':
+        await handleSetLeague(message, args);
+        break;
+        
+      case 'leaderboard':
+        await commands.showLeaderboard(message, channelConfigs.get(message.channel.id)?.leagueId);
+        break;
+        
+      case 'addpet':
+        await commands.draftPet(message, args, channelConfigs.get(message.channel.id)?.leagueId);
+        break;
+        
+      case 'roster':
+      case 'myroster':
+        await commands.showRoster(message, channelConfigs.get(message.channel.id)?.leagueId);
+        break;
+        
+      case 'pets':
+      case 'available':
+        await commands.showAvailablePets(message, channelConfigs.get(message.channel.id)?.leagueId);
+        break;
+        
+      case 'stats':
+        await commands.showStats(message);
+        break;
+        
+      case 'forcecheck':
+        if (message.member?.permissions.has('ADMINISTRATOR')) {
+          await message.reply('🔄 Running manual check...');
+          await runCheck();
+        }
+        break;
+        
+      case 'help':
+        await showHelp(message);
+        break;
+    }
+  } catch (error) {
+    console.error(`Error handling command ${command}:`, error);
+    await message.reply('❌ An error occurred processing your command.');
+  }
+});
+
+bot.on('error', (error) => {
+  console.error('Discord bot error:', error);
+});
+
+// ============ CHECK CYCLE ============
+
+function startCheckCycle() {
+  setInterval(async () => {
+    console.log(`\n⏰ [${new Date().toISOString()}] Running scheduled check...`);
+    await runCheck();
+  }, CHECK_INTERVAL * 60 * 1000);
+}
+
+async function runCheck() {
+  try {
+    console.log('🔍 Checking for pet status changes...');
+    
+    // Get current state of all pets
+    const currentPets = await db.getAllPets();
+    const previousPets = state.getPets();
+    
+    // Detect changes
+    const changes = detectChanges(previousPets, currentPets);
+    
+    if (changes.adopted.length === 0 && changes.newPets.length === 0) {
+      console.log('✅ No changes detected');
+      state.updatePets(currentPets);
+      await state.save();
+      return;
+    }
+    
+    console.log(`📊 Changes detected:`);
+    console.log(`   - ${changes.adopted.length} pets adopted`);
+    console.log(`   - ${changes.newPets.length} new pets available`);
+    
+    // Process adoptions and award points
+    if (changes.adopted.length > 0) {
+      const adoptionResults = await points.processAdoptions(changes.adopted);
+      await broadcastAdoptions(adoptionResults);
+    }
+    
+    // Announce new pets
+    if (changes.newPets.length > 0) {
+      await broadcastNewPets(changes.newPets);
+    }
+    
+    // Update state
+    state.updatePets(currentPets);
+    state.setLastCheck(new Date());
+    await state.save();
+    
+    console.log('✅ Check complete\n');
+  } catch (error) {
+    console.error('❌ Error during check:', error);
+  }
+}
+
+function detectChanges(previousPets, currentPets) {
+  const prevMap = new Map(previousPets.map(p => [p.pet_id, p]));
+  const currMap = new Map(currentPets.map(p => [p.pet_id, p]));
+  
+  const adopted = [];
+  const newPets = [];
+  
+  // Find adopted pets (was available, now removed)
+  for (const [petId, prevPet] of prevMap) {
+    const currPet = currMap.get(petId);
+    if (prevPet.status === 'available' && currPet?.status === 'removed') {
+      adopted.push(currPet);
+    }
+  }
+  
+  // Find new pets
+  for (const [petId, currPet] of currMap) {
+    if (!prevMap.has(petId) && currPet.status === 'available') {
+      newPets.push(currPet);
+    }
+  }
+  
+  return { adopted, newPets };
+}
+
+// ============ DISCORD BROADCASTS ============
+
+async function broadcastAdoptions(adoptionResults) {
+  for (const result of adoptionResults) {
+    const { pet, pointsAwarded } = result;
+    
+    // Create adoption embed
+    const embed = new EmbedBuilder()
+      .setColor('#e74c3c')
+      .setTitle('🎉 Pet Adopted!')
+      .setDescription(`**${pet.name}** has been adopted!`)
+      .addFields(
+        { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
+        { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
+        { name: 'Days in Shelter', value: `${calculateDaysSince(pet.brought_to_shelter)}`, inline: true }
+      );
+    
+    // Add points awarded section
+    if (pointsAwarded.length > 0) {
+      const pointsText = pointsAwarded
+        .slice(0, 10)
+        .map(p => `• **${p.userName}** earned ${p.points} points in ${p.leagueName}`)
+        .join('\n');
+      
+      embed.addFields({
+        name: '🏆 Points Awarded',
+        value: pointsText + (pointsAwarded.length > 10 ? `\n... and ${pointsAwarded.length - 10} more` : '')
+      });
+    }
+    
+    // Broadcast to relevant channels
+    await broadcastToChannels(embed, pointsAwarded);
+    
+    // Update leaderboards in affected leagues
+    for (const award of pointsAwarded) {
+      await updateLeaderboardMessage(award.leagueId);
+    }
+  }
+}
+
+async function broadcastNewPets(newPets) {
+  // Limit to 10 pets per message
+  const petsToShow = newPets.slice(0, 10);
+  
+  const embed = new EmbedBuilder()
+    .setColor('#2ecc71')
+    .setTitle('🐾 New Pets Available!')
+    .setDescription(`${newPets.length} new pet(s) just arrived at the shelter`)
+    .setTimestamp();
+  
+  // Add pet fields
+  for (const pet of petsToShow) {
+    embed.addFields({
+      name: `${pet.name} (${pet.pet_id})`,
+      value: `${pet.breed || 'Unknown breed'} • ${pet.animal_type || 'Unknown'} • ${pet.age || 'Unknown age'}`,
+      inline: false
+    });
+  }
+  
+  if (newPets.length > 10) {
+    embed.addFields({
+      name: '\u200b',
+      value: `... and ${newPets.length - 10} more`
+    });
+  }
+  
+  // Broadcast to all configured channels
+  await broadcastToAllChannels(embed);
+}
+
+async function broadcastToChannels(embed, pointsAwarded) {
+  // Get unique league IDs from points awarded
+  const leagueIds = new Set(pointsAwarded.map(p => p.leagueId));
+  
+  // Find channels configured for these leagues
+  for (const [channelId, config] of channelConfigs) {
+    if (leagueIds.has(config.leagueId)) {
+      try {
+        const channel = await bot.channels.fetch(channelId);
+        if (channel) {
+          await channel.send({ embeds: [embed] });
+        }
+      } catch (error) {
+        console.error(`Failed to send to channel ${channelId}:`, error.message);
+      }
+    }
+  }
+  
+  // Also send to default notification channel if configured
+  if (DEFAULT_NOTIFICATION_CHANNEL && !channelConfigs.has(DEFAULT_NOTIFICATION_CHANNEL)) {
+    try {
+      const channel = await bot.channels.fetch(DEFAULT_NOTIFICATION_CHANNEL);
+      if (channel) {
+        await channel.send({ embeds: [embed] });
+      }
+    } catch (error) {
+      console.error('Failed to send to default channel:', error.message);
+    }
+  }
+}
+
+async function broadcastToAllChannels(embed) {
+  // Send to all configured channels
+  const sentChannels = new Set();
+  
+  for (const [channelId, config] of channelConfigs) {
+    if (!sentChannels.has(channelId)) {
+      try {
+        const channel = await bot.channels.fetch(channelId);
+        if (channel) {
+          await channel.send({ embeds: [embed] });
+          sentChannels.add(channelId);
+        }
+      } catch (error) {
+        console.error(`Failed to send to channel ${channelId}:`, error.message);
+      }
+    }
+  }
+  
+  // Send to default channel if not already sent
+  if (DEFAULT_NOTIFICATION_CHANNEL && !sentChannels.has(DEFAULT_NOTIFICATION_CHANNEL)) {
+    try {
+      const channel = await bot.channels.fetch(DEFAULT_NOTIFICATION_CHANNEL);
+      if (channel) {
+        await channel.send({ embeds: [embed] });
+      }
+    } catch (error) {
+      console.error('Failed to send to default channel:', error.message);
+    }
+  }
+}
+
+async function updateLeaderboardMessage(leagueId) {
+  // This would update pinned leaderboard messages in channels
+  // Implementation depends on whether you want persistent leaderboard messages
+}
+
+// ============ COMMAND HANDLERS ============
+
+async function handleSetLeague(message, args) {
+  if (args.length === 0) {
+    await message.reply('Usage: `!setleague [league name]`');
+    return;
+  }
+  
+  const leagueName = args.join(' ');
+  
+  // Find league in database
+  const league = await db.getLeagueByName(leagueName);
+  
+  if (!league) {
+    await message.reply(`❌ League "${leagueName}" not found.`);
+    return;
+  }
+  
+  // Save channel configuration
+  channelConfigs.set(message.channel.id, {
+    leagueId: league.id,
+    leagueName: league.name
+  });
+  
+  // Persist to database
+  await db.setChannelLeague(message.channel.id, league.id);
+  
+  await message.reply(`✅ This channel is now tracking **${league.name}**`);
+}
+
+async function showHelp(message) {
+  const embed = new EmbedBuilder()
+    .setColor('#3498db')
+    .setTitle('🐾 Fantasy Pet League Bot Commands')
+    .setDescription('Track pet adoptions and compete in leagues!')
+    .addFields(
+      { name: '!setleague [name]', value: 'Set this channel to track a specific league', inline: false },
+      { name: '!leaderboard', value: 'Show current league standings', inline: false },
+      { name: '!addpet [pet_id]', value: 'Draft a pet to your roster', inline: false },
+      { name: '!roster', value: 'View your current roster', inline: false },
+      { name: '!pets', value: 'Show available pets to draft', inline: false },
+      { name: '!stats', value: 'View adoption statistics', inline: false },
+      { name: '!help', value: 'Show this help message', inline: false }
+    )
+    .setFooter({ text: 'Points are awarded automatically when your drafted pets get adopted!' });
+  
+  await message.reply({ embeds: [embed] });
+}
+
+// ============ UTILITY FUNCTIONS ============
+
+function calculateDaysSince(date) {
+  if (!date) return 0;
+  const now = new Date();
+  const then = new Date(date);
+  const diff = now - then;
+  return Math.max(0, Math.floor(diff / (1000 * 60 * 60 * 24)));
+}
+
+async function loadChannelConfigs() {
+  try {
+    const configs = await db.getChannelConfigs();
+    for (const config of configs) {
+      channelConfigs.set(config.channel_id, {
+        leagueId: config.league_id,
+        leagueName: config.league_name
+      });
+    }
+    console.log(`✅ Loaded ${channelConfigs.size} channel configurations`);
+  } catch (error) {
+    console.error('Failed to load channel configs:', error);
+  }
+}
+
+// ============ STARTUP ============
+
+async function start() {
+  try {
+    console.log('🚀 Starting Fantasy Pet League Bot...');
+    
+    if (!DISCORD_TOKEN) {
+      throw new Error('DISCORD_BOT_TOKEN not set in environment');
+    }
+    
+    await bot.login(DISCORD_TOKEN);
+  } catch (error) {
+    console.error('Failed to start bot:', error);
+    process.exit(1);
+  }
+}
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n👋 Shutting down gracefully...');
+  await state.save();
+  await db.close();
+  bot.destroy();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n👋 Shutting down gracefully...');
+  await state.save();
+  await db.close();
+  bot.destroy();
+  process.exit(0);
+});
+
+// Start the bot
+start();

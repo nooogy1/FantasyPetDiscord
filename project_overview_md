@@ -1,0 +1,226 @@
+# Fantasy Pet League Discord Bot - Project Structure
+
+## 📁 Complete File Structure
+
+```
+fantasy-pet-league-bot/
+├── bot.js                              # Main bot entry point (24/7 runner)
+├── package.json                        # Node.js dependencies
+├── .env.example                        # Environment template
+├── .gitignore                          # Git ignore rules
+├── README.md                           # Comprehensive documentation
+├── Dockerfile                          # Container configuration
+├── docker-compose.yml                  # Local development setup
+├── test.js                             # Database and system tests
+├── bot_state.json                      # Persistent state (auto-generated)
+│
+├── lib/                                # Core modules
+│   ├── Database.js                     # PostgreSQL interface
+│   ├── PointsManager.js                # Points calculation & awarding
+│   ├── StateManager.js                 # State persistence & memory
+│   └── CommandHandler.js               # Discord command implementations
+│
+└── migrations/                         # Database schema updates
+    └── add_discord_bot_tables.sql      # Discord-specific tables
+```
+
+## 🎯 Key Features Implemented
+
+### ✅ Points Management (Single Source of Truth)
+- **Exclusive points authority** - Only this bot can award points
+- **Hourly adoption checks** - Configurable interval (default 60 min)
+- **Atomic transactions** - Points awarded exactly once per adoption
+- **Breed-based scoring** - Uses `breed_points` table
+- **Automatic roster cleanup** - Removes adopted pets
+
+### ✅ State Management
+- **Persistent memory** - Survives bot restarts
+- **JSON file backup** - Local state persistence
+- **Database backup** - Optional PostgreSQL state storage
+- **Change detection** - Compares current vs previous state
+- **Statistics tracking** - Total adoptions, points, etc.
+
+### ✅ Discord Integration
+- **Multi-league support** - Channel-specific league tracking
+- **Rich embeds** - Beautiful notifications and responses
+- **User commands** - Draft pets, view rosters, check standings
+- **Admin commands** - Force checks, view logs
+- **Event notifications** - Adoptions, new pets, points awarded
+
+### ✅ Database Operations
+- **Optimized queries** - Indexed lookups, efficient joins
+- **Transaction support** - Atomic point awards
+- **View helpers** - Recent adoptions, league stats
+- **Function helpers** - User statistics calculations
+
+## 🚀 Deployment Options
+
+### Option 1: Railway (Recommended for 24/7)
+```bash
+# Deploy to Railway
+railway login
+railway new fantasy-pet-league-bot
+railway link
+railway variables set DISCORD_BOT_TOKEN=your_token
+railway variables set DATABASE_URL=${{Postgres.DATABASE_URL}}
+railway up
+```
+
+### Option 2: Docker
+```bash
+# Build and run with Docker
+docker build -t fantasy-pet-bot .
+docker run -d \
+  --name fantasy-pet-bot \
+  --env-file .env \
+  --restart unless-stopped \
+  fantasy-pet-bot
+```
+
+### Option 3: PM2 (Node Process Manager)
+```bash
+# Install PM2
+npm install -g pm2
+
+# Start bot
+pm2 start bot.js --name "fantasy-pet-bot"
+pm2 save
+pm2 startup
+```
+
+## 🔄 Bot Workflow
+
+```mermaid
+graph TD
+    A[Bot Starts] --> B[Load State]
+    B --> C[Connect Database]
+    C --> D[Connect Discord]
+    D --> E[Start Check Timer]
+    
+    E --> F[Every 60 Minutes]
+    F --> G[Query All Pets]
+    G --> H[Compare with Previous State]
+    
+    H --> I{Changes?}
+    I -->|Yes| J[Process Adoptions]
+    I -->|No| M[Update State]
+    
+    J --> K[Award Points]
+    K --> L[Send Notifications]
+    L --> M[Update State]
+    M --> N[Save State]
+    N --> F
+```
+
+## 💾 Database Schema
+
+### Core Tables (Shared with Main App)
+- `pets` - All pet records
+- `users` - User accounts
+- `leagues` - League definitions
+- `roster_entries` - Drafted pets
+- `points` - Points history
+- `breed_points` - Breed values
+- `leaderboard_cache` - Cached standings
+
+### Bot-Specific Tables
+- `discord_channel_config` - Channel to league mapping
+- `discord_bot_state` - Persistent bot state
+- `discord_bot_logs` - Activity audit log
+- `discord_notification_preferences` - User preferences
+
+## 📊 Monitoring & Maintenance
+
+### Health Checks
+```javascript
+// Built into bot.js
+- Database connection check on startup
+- Discord connection monitoring
+- State persistence verification
+- Error logging and recovery
+```
+
+### Manual Operations
+```sql
+-- Check recent adoptions
+SELECT * FROM pets 
+WHERE status = 'removed' 
+AND last_seen > NOW() - INTERVAL '24 hours';
+
+-- Check recent points
+SELECT u.first_name, l.name, p.points_amount, p.awarded_at
+FROM points p
+JOIN users u ON u.id = p.user_id
+JOIN leagues l ON l.id = p.league_id
+ORDER BY p.awarded_at DESC
+LIMIT 10;
+
+-- Force state reset (careful!)
+DELETE FROM discord_bot_state;
+```
+
+## 🔐 Security Considerations
+
+1. **Environment Variables** - Never commit tokens
+2. **Database Credentials** - Use connection strings
+3. **Points Integrity** - Atomic transactions only
+4. **User Permissions** - Discord role validation
+5. **Rate Limiting** - Built-in Discord.js handling
+
+## 📈 Performance Optimizations
+
+- **Indexed queries** - All lookups use indexes
+- **Batch processing** - Process multiple adoptions together
+- **State caching** - Minimize database reads
+- **Connection pooling** - Reuse database connections
+- **Async operations** - Non-blocking I/O
+
+## 🐛 Common Issues & Solutions
+
+### Bot Offline
+```bash
+# Check logs
+pm2 logs fantasy-pet-bot
+
+# Restart
+pm2 restart fantasy-pet-bot
+```
+
+### Points Not Awarding
+```sql
+-- Verify pet was drafted
+SELECT * FROM roster_entries WHERE pet_id = (
+  SELECT id FROM pets WHERE pet_id = 'A2043899'
+);
+
+-- Check breed points exist
+SELECT * FROM breed_points WHERE breed = 'German Shepherd mix';
+```
+
+### State Corruption
+```bash
+# Backup current state
+cp bot_state.json bot_state.backup.json
+
+# Reset state
+rm bot_state.json
+npm start
+```
+
+## 🎯 Next Steps
+
+1. **Test locally** with `npm test`
+2. **Set up Discord bot** in developer portal
+3. **Deploy to Railway** for 24/7 operation
+4. **Configure channels** with `!setleague`
+5. **Monitor adoptions** via Discord notifications
+
+## 📞 Support
+
+- GitHub Issues: Report bugs and request features
+- Discord: Join our server for help
+- Documentation: Check README.md for details
+
+---
+
+**Remember**: This bot is the **single source of truth** for points. The main web app should never award points directly - only this bot has that authority.
