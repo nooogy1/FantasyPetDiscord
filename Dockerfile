@@ -11,9 +11,6 @@ RUN npm ci --only=production
 # Copy application files
 COPY . .
 
-# Create volume for state persistence
-VOLUME ["/app/bot_state.json"]
-
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "console.log('Healthy')" || exit 1
@@ -24,4 +21,5 @@ RUN addgroup -g 1001 -S nodejs && \
 USER nodejs
 
 # Start the bot
+
 CMD ["node", "bot.js"]
