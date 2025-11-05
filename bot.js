@@ -6,6 +6,7 @@ const PointsManager = require('./lib/PointsManager');
 const Database = require('./lib/Database');
 const StateManager = require('./lib/StateManager');
 const CommandHandler = require('./lib/CommandHandler');
+const FilterHandler = require('./lib/FilterHandler');
 require('dotenv').config();
 
 // ============ CONFIGURATION ============
@@ -13,6 +14,7 @@ require('dotenv').config();
 const CHECK_INTERVAL = process.env.CHECK_INTERVAL || 60; // minutes
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DEFAULT_NOTIFICATION_CHANNEL = process.env.DEFAULT_CHANNEL_ID;
+const ROSTER_LIMIT = parseInt(process.env.ROSTER_LIMIT || '10'); // max pets per roster
 
 // ============ INITIALIZATION ============
 
@@ -29,6 +31,7 @@ const db = new Database();
 const state = new StateManager();
 const points = new PointsManager(db, state);
 const commands = new CommandHandler(bot, db);
+const filter = new FilterHandler(bot, db, ROSTER_LIMIT);
 
 // Channel configurations (which leagues to track per channel)
 const channelConfigs = new Map(); // channelId -> { leagueId, leagueName }
@@ -82,7 +85,7 @@ bot.on('messageCreate', async (message) => {
         break;
         
       case 'addpet':
-        await commands.draftPet(message, args, channelConfigs.get(message.channel.id)?.leagueId);
+        await commands.draftPet(message, args, channelConfigs.get(message.channel.id)?.leagueId, ROSTER_LIMIT);
         break;
         
       case 'roster':
@@ -91,8 +94,12 @@ bot.on('messageCreate', async (message) => {
         break;
         
       case 'pets':
-      case 'available':
-        await commands.showAvailablePets(message, channelConfigs.get(message.channel.id)?.leagueId);
+        // Use new filter system for league channels
+        if (channelConfigs.get(message.channel.id)) {
+          await filter.startFiltering(message, channelConfigs.get(message.channel.id)?.leagueId);
+        } else {
+          await message.reply('❌ This channel is not configured for a league. Use `!setleague [name]` first.');
+        }
         break;
         
       case 'stats':
@@ -117,6 +124,21 @@ bot.on('messageCreate', async (message) => {
   } catch (error) {
     console.error(`Error handling command ${command}:`, error);
     await message.reply('❌ An error occurred processing your command.');
+  }
+});
+
+bot.on('interactionCreate', async (interaction) => {
+  // Handle button interactions from carousel
+  if (!interaction.isButton()) return;
+  
+  try {
+    // Buttons are handled by FilterHandler's collectors
+    // This is just a catch-all for any missed interactions
+  } catch (error) {
+    console.error('Error handling interaction:', error);
+    if (!interaction.replied) {
+      await interaction.reply({ content: '❌ Error processing interaction.', ephemeral: true });
+    }
   }
 });
 
@@ -495,7 +517,7 @@ async function showHelp(message) {
       { name: '!leaderboard', value: 'Show current league standings', inline: false },
       { name: '!addpet [pet_id]', value: 'Draft a pet to your roster', inline: false },
       { name: '!roster', value: 'View your current roster', inline: false },
-      { name: '!pets', value: 'Show available pets to draft', inline: false },
+      { name: '!pets', value: 'Browse available pets with interactive filters', inline: false },
       { name: '!points', value: 'Show your points and which pets earned them', inline: false },
       { name: '!stats', value: 'View adoption statistics', inline: false },
       { name: '!help', value: 'Show this help message', inline: false }
