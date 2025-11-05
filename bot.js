@@ -69,6 +69,10 @@ bot.on('messageCreate', async (message) => {
   
   try {
     switch(command) {
+      case 'linkplayer':
+        await handleLinkPlayer(message, args);
+        break;
+
       case 'setleague':
         await handleSetLeague(message, args);
         break;
@@ -140,6 +144,9 @@ async function runCheck() {
       console.log('✅ No changes detected');
       state.updatePets(currentPets);
       await state.save();
+      
+      // Send status to Discord
+      await broadcastCheckStatus('✅ Check Complete', 'No changes detected', '#2ecc71');
       return;
     }
     
@@ -163,9 +170,17 @@ async function runCheck() {
     state.setLastCheck(new Date());
     await state.save();
     
+    // Send summary status to Discord
+    await broadcastCheckStatus(
+      '📊 Check Complete',
+      `${changes.adopted.length} pets adopted, ${changes.newPets.length} new pets`,
+      '#3498db'
+    );
+    
     console.log('✅ Check complete\n');
   } catch (error) {
     console.error('❌ Error during check:', error);
+    await broadcastCheckStatus('❌ Check Failed', error.message, '#e74c3c');
   }
 }
 
@@ -195,6 +210,38 @@ function detectChanges(previousPets, currentPets) {
 }
 
 // ============ DISCORD BROADCASTS ============
+
+async function broadcastCheckStatus(title, description, color) {
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(title)
+    .setDescription(description)
+    .setTimestamp();
+  
+  // Send to all configured channels
+  for (const [channelId, config] of channelConfigs) {
+    try {
+      const channel = await bot.channels.fetch(channelId);
+      if (channel) {
+        await channel.send({ embeds: [embed] });
+      }
+    } catch (error) {
+      console.error(`Failed to send status to channel ${channelId}:`, error.message);
+    }
+  }
+  
+  // Also send to default channel if configured
+  if (DEFAULT_NOTIFICATION_CHANNEL && !channelConfigs.has(DEFAULT_NOTIFICATION_CHANNEL)) {
+    try {
+      const channel = await bot.channels.fetch(DEFAULT_NOTIFICATION_CHANNEL);
+      if (channel) {
+        await channel.send({ embeds: [embed] });
+      }
+    } catch (error) {
+      console.error('Failed to send status to default channel:', error.message);
+    }
+  }
+}
 
 async function broadcastAdoptions(adoptionResults) {
   for (const result of adoptionResults) {
@@ -333,6 +380,73 @@ async function updateLeaderboardMessage(leagueId) {
 
 // ============ COMMAND HANDLERS ============
 
+async function handleLinkPlayer(message, args) {
+  if (args.length === 0) {
+    await message.reply('Usage: `!linkplayer [first_name]`\nExample: `!linkplayer Paul Corgi`');
+    return;
+  }
+  
+  const firstName = args.join(' ');
+  const discordId = message.author.id;
+  const discordUsername = message.author.username;
+  
+  try {
+    console.log(`🔗 Player linking requested: Discord user ${discordUsername} (${discordId}) → "${firstName}"`);
+    
+    // Step 1: Find user by first name in database
+    const user = await db.getUserByFirstName(firstName);
+    
+    if (!user) {
+      await message.reply(
+        `❌ No player found named **"${firstName}"**.\n` +
+        `Check your name spelling or contact league admin.`
+      );
+      return;
+    }
+    
+    // Step 2: Check if this player is already linked to someone else
+    if (user.discord_id && user.discord_id !== discordId) {
+      await message.reply(
+        `❌ Player **"${firstName}"** is already linked to another Discord account.\n` +
+        `Contact league admin to unlink.`
+      );
+      return;
+    }
+    
+    // Step 3: Check if this Discord ID is already linked to someone else
+    const existingUser = await db.getUserByDiscordId(discordId);
+    if (existingUser && existingUser.id !== user.id) {
+      await message.reply(
+        `❌ Your Discord account is already linked to **"${existingUser.first_name}"**.\n` +
+        `Use a different Discord account or contact admin.`
+      );
+      return;
+    }
+    
+    // Step 4: Link them!
+    await db.linkPlayerToDiscord(user.id, discordId);
+    console.log(`✅ Linked: ${firstName} (${user.id}) ← ${discordUsername} (${discordId})`);
+    
+    // Step 5: Confirm to user
+    const embed = new EmbedBuilder()
+      .setColor('#2ecc71')
+      .setTitle('✅ Player Linked!')
+      .setDescription(`Your Discord account is now linked to **${user.first_name}**`)
+      .addFields(
+        { name: 'Discord Username', value: discordUsername, inline: true },
+        { name: 'Player Name', value: user.first_name, inline: true }
+      )
+      .setFooter({ text: 'You can now use all bot commands!' })
+      .setTimestamp();
+    
+    await message.reply({ embeds: [embed] });
+    
+  } catch (error) {
+    console.error('Error linking player:', error);
+    await message.reply('❌ Error linking player. Contact admin.');
+  }
+}
+
 async function handleSetLeague(message, args) {
   if (args.length === 0) {
     await message.reply('Usage: `!setleague [league name]`');
@@ -367,6 +481,7 @@ async function showHelp(message) {
     .setTitle('🐾 Fantasy Pet League Bot Commands')
     .setDescription('Track pet adoptions and compete in leagues!')
     .addFields(
+      { name: '!linkplayer [name]', value: 'Link your Discord account to your player profile', inline: false },
       { name: '!setleague [name]', value: 'Set this channel to track a specific league', inline: false },
       { name: '!leaderboard', value: 'Show current league standings', inline: false },
       { name: '!addpet [pet_id]', value: 'Draft a pet to your roster', inline: false },
