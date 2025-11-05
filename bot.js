@@ -262,6 +262,11 @@ async function broadcastAdoptions(adoptionResults) {
         { name: 'Days in Shelter', value: `${calculateDaysSince(pet.brought_to_shelter)}`, inline: true }
       );
     
+    // Add pet image if available
+    if (pet.photo_url) {
+      embed.setImage(pet.photo_url);
+    }
+    
     // Add points awarded section
     if (pointsAwarded.length > 0) {
       const pointsText = pointsAwarded
