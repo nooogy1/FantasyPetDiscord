@@ -35,7 +35,7 @@ const channelConfigs = new Map(); // channelId -> { leagueId, leagueName }
 
 // ============ BOT EVENTS ============
 
-bot.on('ready', async () => {
+bot.on('clientReady', async () => {
   console.log(`✅ Bot logged in as ${bot.user.tag}`);
   console.log(`⏰ Check interval: ${CHECK_INTERVAL} minutes`);
   
@@ -97,6 +97,10 @@ bot.on('messageCreate', async (message) => {
         
       case 'stats':
         await commands.showStats(message);
+        break;
+
+      case 'points':
+        await commands.showPointHistory(message, channelConfigs.get(message.channel.id)?.leagueId);
         break;
         
       case 'forcecheck':
@@ -487,6 +491,7 @@ async function showHelp(message) {
       { name: '!addpet [pet_id]', value: 'Draft a pet to your roster', inline: false },
       { name: '!roster', value: 'View your current roster', inline: false },
       { name: '!pets', value: 'Show available pets to draft', inline: false },
+      { name: '!points', value: 'Show your points and which pets earned them', inline: false },
       { name: '!stats', value: 'View adoption statistics', inline: false },
       { name: '!help', value: 'Show this help message', inline: false }
     )
