@@ -1,6 +1,7 @@
-// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED)
+// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v2)
 // This bot runs 24/7, checks for adopted pets hourly, and awards points
-// UPDATED: Now shows leaderboard after adoptions
+// UPDATED: Auto-displays pet cards for A2XXXXXX mentions
+// UPDATED: Shows leaderboard after adoptions
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const PointsManager = require('./lib/PointsManager');
@@ -67,6 +68,67 @@ bot.on('clientReady', async () => {
 
 bot.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+  
+  // ============ PET ID LOOKUP FEATURE ============
+  // Check for pet ID mentions (A2XXXXXX format) anywhere in the message
+  const petIdRegex = /A2\d{6}/g;
+  const petIds = message.content.match(petIdRegex);
+  
+  if (petIds) {
+    // Remove duplicates
+    const uniquePetIds = [...new Set(petIds)];
+    
+    for (const petId of uniquePetIds) {
+      try {
+        const pet = await db.getPetById(petId);
+        
+        if (pet) {
+          // Calculate days on roster
+          let daysOnRoster = 'N/A';
+          if (pet.brought_to_shelter) {
+            const now = new Date();
+            const brought = new Date(pet.brought_to_shelter);
+            const diff = now - brought;
+            daysOnRoster = Math.max(0, Math.floor(diff / (1000 * 60 * 60 * 24)));
+          }
+          
+          // Determine status emoji
+          const statusEmoji = pet.status === 'available' ? '✅' : '🏠';
+          
+          // Create pet card embed
+          const petCard = new EmbedBuilder()
+            .setColor(pet.status === 'available' ? '#2ecc71' : '#95a5a6')
+            .setTitle(`${pet.name}`)
+            .setDescription(`**ID:** ${pet.pet_id}`)
+            .addFields(
+              { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
+              { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
+              { name: 'Gender', value: pet.gender || 'Unknown', inline: true },
+              { name: 'Age', value: pet.age || 'Unknown', inline: true },
+              { name: 'Status', value: `${statusEmoji} ${pet.status}`, inline: true },
+              { name: 'Days in Shelter', value: String(daysOnRoster), inline: true }
+            )
+            .setTimestamp();
+          
+          // Add image if available
+          if (pet.photo_url) {
+            petCard.setImage(pet.photo_url);
+          }
+          
+          // Add footer with source
+          if (pet.source) {
+            petCard.setFooter({ text: `Source: ${pet.source}` });
+          }
+          
+          await message.reply({ embeds: [petCard], allowedMentions: { repliedUser: false } });
+        }
+      } catch (error) {
+        console.error(`Error looking up pet ${petId}:`, error);
+      }
+    }
+  }
+  
+  // ============ COMMAND HANDLER ============
   if (!message.content.startsWith('!')) return;
   
   const args = message.content.slice(1).trim().split(/ +/);
@@ -581,6 +643,7 @@ async function showHelp(message) {
     .setTitle('🐾 Fantasy Pet League Bot Commands')
     .setDescription('Track pet adoptions and compete in leagues!')
     .addFields(
+      { name: '🐶 Pet Lookup', value: 'Mention any pet ID (A2XXXXXX) in chat to see pet card', inline: false },
       { name: '!linkplayer [name]', value: 'Link your Discord account to your player profile', inline: false },
       { name: '!setleague [name]', value: 'Set this channel to track a specific league', inline: false },
       { name: '!leaderboard', value: 'Show current league standings', inline: false },
