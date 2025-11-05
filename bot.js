@@ -1,5 +1,6 @@
-// bot.js - Fantasy Pet League Discord Bot & Points Manager
+// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED)
 // This bot runs 24/7, checks for adopted pets hourly, and awards points
+// UPDATED: Now shows leaderboard after adoptions
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const PointsManager = require('./lib/PointsManager');
@@ -271,6 +272,8 @@ async function broadcastCheckStatus(title, description, color) {
 }
 
 async function broadcastAdoptions(adoptionResults) {
+  const leaguesAffected = new Map(); // leagueId -> array of awards
+  
   for (const result of adoptionResults) {
     const { pet, pointsAwarded } = result;
     
@@ -306,10 +309,80 @@ async function broadcastAdoptions(adoptionResults) {
     // Broadcast to relevant channels
     await broadcastToChannels(embed, pointsAwarded);
     
-    // Update leaderboards in affected leagues
+    // Track affected leagues for leaderboard updates
     for (const award of pointsAwarded) {
-      await updateLeaderboardMessage(award.leagueId);
+      if (!leaguesAffected.has(award.leagueId)) {
+        leaguesAffected.set(award.leagueId, []);
+      }
+      leaguesAffected.get(award.leagueId).push(award);
     }
+  }
+  
+  // After all adoptions broadcast, show updated leaderboards
+  for (const [leagueId, awards] of leaguesAffected) {
+    await showLeaderboardUpdate(leagueId);
+  }
+}
+
+/**
+ * Show updated leaderboard for a league after adoptions
+ */
+async function showLeaderboardUpdate(leagueId) {
+  try {
+    // Get league info
+    const league = await db.getLeagueById(leagueId);
+    if (!league) return;
+    
+    // Get leaderboard
+    const leaderboard = await db.getLeaderboard(leagueId, 10);
+    if (leaderboard.length === 0) return;
+    
+    // Create leaderboard embed
+    const embed = new EmbedBuilder()
+      .setColor('#f39c12')
+      .setTitle(`📊 Updated Leaderboard - ${league.name}`)
+      .setTimestamp();
+    
+    // Format leaderboard
+    const leaderboardText = leaderboard.map((entry, index) => {
+      let medal = '';
+      if (index === 0) medal = '🥇';
+      else if (index === 1) medal = '🥈';
+      else if (index === 2) medal = '🥉';
+      
+      const city = entry.city ? ` (${entry.city})` : '';
+      return `${medal} **#${entry.rank}** ${entry.first_name}${city} - **${entry.total_points}** pts`;
+    }).join('\n');
+    
+    embed.setDescription(leaderboardText);
+    
+    // Find channels for this league
+    for (const [channelId, config] of channelConfigs) {
+      if (config.leagueId === leagueId) {
+        try {
+          const channel = await bot.channels.fetch(channelId);
+          if (channel) {
+            await channel.send({ embeds: [embed] });
+          }
+        } catch (error) {
+          console.error(`Failed to send leaderboard to channel ${channelId}:`, error.message);
+        }
+      }
+    }
+    
+    // Also send to default notification channel if configured
+    if (DEFAULT_NOTIFICATION_CHANNEL && !channelConfigs.has(DEFAULT_NOTIFICATION_CHANNEL)) {
+      try {
+        const channel = await bot.channels.fetch(DEFAULT_NOTIFICATION_CHANNEL);
+        if (channel) {
+          await channel.send({ embeds: [embed] });
+        }
+      } catch (error) {
+        console.error('Failed to send leaderboard to default channel:', error.message);
+      }
+    }
+  } catch (error) {
+    console.error(`Error showing leaderboard update for league ${leagueId}:`, error);
   }
 }
 
@@ -403,11 +476,6 @@ async function broadcastToAllChannels(embed) {
       console.error('Failed to send to default channel:', error.message);
     }
   }
-}
-
-async function updateLeaderboardMessage(leagueId) {
-  // This would update pinned leaderboard messages in channels
-  // Implementation depends on whether you want persistent leaderboard messages
 }
 
 // ============ COMMAND HANDLERS ============
