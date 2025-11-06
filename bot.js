@@ -95,11 +95,11 @@ bot.on('messageCreate', async (message) => {
           // Determine status emoji
           const statusEmoji = pet.status === 'available' ? '✅' : '🏠';
           
-          // Create pet card embed
+          // Create pet card embed with hyperlinked title and ID
           const petCard = new EmbedBuilder()
             .setColor(pet.status === 'available' ? '#2ecc71' : '#95a5a6')
-            .setTitle(`${pet.name}`)
-            .setDescription(`**ID:** ${pet.pet_id}`)
+            .setTitle(`[${pet.name}](${pet.pet_url})`)
+            .setDescription(`**ID:** [${pet.pet_id}](${pet.pet_url})`)
             .addFields(
               { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
               { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
@@ -120,7 +120,128 @@ bot.on('messageCreate', async (message) => {
             petCard.setFooter({ text: `Source: ${pet.source}` });
           }
           
-          await message.reply({ embeds: [petCard], allowedMentions: { repliedUser: false } });
+          // Create adopt button if pet is available
+          let components = [];
+          if (pet.status === 'available') {
+            const { ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
+            const adoptButton = new ButtonBuilder()
+              .setCustomId(`adopt_${petId}_${message.channel.id}`)
+              .setLabel('🐾 Adopt to Roster')
+              .setStyle(ButtonStyle.Success);
+            
+            components = [new ActionRowBuilder().addComponents(adoptButton)];
+          }
+          
+          const reply = await message.reply({ embeds: [petCard], components, allowedMentions: { repliedUser: false }, fetchReply: true });
+          
+          // Set up button collector if available
+          if (pet.status === 'available') {
+            const buttonFilter = (interaction) => interaction.customId === `adopt_${petId}_${message.channel.id}`;
+            const buttonCollector = reply.createMessageComponentCollector({ filter: buttonFilter, time: 600000 }); // 10 minutes
+            
+            buttonCollector.on('collect', async (interaction) => {
+              try {
+                // Get user's league for this channel
+                const channelLeagueId = channelConfigs.get(message.channel.id)?.leagueId;
+                
+                if (!channelLeagueId) {
+                  await interaction.reply({
+                    content: '❌ This channel is not configured for a league. Use `!setleague [name]` first.',
+                    ephemeral: true
+                  });
+                  return;
+                }
+                
+                // Get or create user
+                let user = await db.getUserByDiscordId(interaction.user.id);
+                if (!user) {
+                  user = await db.createUserWithDiscord(interaction.user.id, interaction.user.username);
+                }
+                
+                // Check roster limit
+                const roster = await db.getUserRoster(user.id, channelLeagueId);
+                if (roster.length >= ROSTER_LIMIT) {
+                  await interaction.reply({
+                    content: `❌ Your roster is full! You have **${roster.length}/${ROSTER_LIMIT}** pets.`,
+                    ephemeral: true
+                  });
+                  return;
+                }
+                
+                // Check if already drafted
+                if (roster.some(r => r.pet_id === petId)) {
+                  await interaction.reply({
+                    content: `❌ You've already drafted **[${pet.name}](${pet.pet_url})** in this league.`,
+                    ephemeral: true
+                  });
+                  return;
+                }
+                
+                // Draft the pet
+                await db.draftPet(user.id, channelLeagueId, pet.id);
+                
+                // Send confirmation
+                const confirmEmbed = new EmbedBuilder()
+                  .setColor('#2ecc71')
+                  .setTitle('✅ Pet Drafted!')
+                  .setDescription(`**[${pet.name}](${pet.pet_url})** has been added to your roster`)
+                  .addFields(
+                    { name: 'Pet ID', value: `[${pet.pet_id}](${pet.pet_url})`, inline: true },
+                    { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
+                    { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
+                    { name: 'Roster', value: `${roster.length + 1}/${ROSTER_LIMIT}`, inline: true }
+                  )
+                  .setFooter({ text: 'You\'ll earn points if this pet gets adopted!' })
+                  .setTimestamp();
+                
+                if (pet.photo_url) {
+                  confirmEmbed.setImage(pet.photo_url);
+                }
+                
+                await interaction.reply({ embeds: [confirmEmbed] });
+                
+                // Broadcast to channel
+                const league = await db.getLeagueById(channelLeagueId);
+                const petCard2 = new EmbedBuilder()
+                  .setColor('#2ecc71')
+                  .setTitle(`✅ Pet Drafted: [${pet.name}](${pet.pet_url})`)
+                  .setDescription(`**${interaction.user.username}** drafted **[${pet.name}](${pet.pet_url})**`)
+                  .addFields(
+                    { name: 'Pet ID', value: `[${pet.pet_id}](${pet.pet_url})`, inline: true },
+                    { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
+                    { name: 'Type', value: pet.animal_type || 'Unknown', inline: true }
+                  )
+                  .setTimestamp();
+                
+                if (pet.photo_url) {
+                  petCard2.setImage(pet.photo_url);
+                }
+                
+                await message.channel.send({ embeds: [petCard2] });
+              } catch (error) {
+                console.error('Error in pet lookup adopt:', error);
+                await interaction.reply({
+                  content: '❌ Error adopting pet. Please try again.',
+                  ephemeral: true
+                });
+              }
+            });
+            
+            buttonCollector.on('end', async () => {
+              try {
+                const { ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
+                const disabledButton = new ButtonBuilder()
+                  .setCustomId('adopt_disabled')
+                  .setLabel('🐾 Adopt to Roster')
+                  .setStyle(ButtonStyle.Success)
+                  .setDisabled(true);
+                
+                await reply.edit({ components: [new ActionRowBuilder().addComponents(disabledButton)] });
+              } catch (e) {
+                // Message might be deleted
+              }
+            });
+          }
         }
       } catch (error) {
         console.error(`Error looking up pet ${petId}:`, error);
@@ -235,8 +356,7 @@ async function runCheck() {
       state.updatePets(currentPets);
       await state.save();
       
-      // Send status to Discord
-      await broadcastCheckStatus('✅ Check Complete', 'No changes detected', '#2ecc71');
+      // Silent - no Discord message when nothing changed
       return;
     }
     
@@ -259,13 +379,6 @@ async function runCheck() {
     state.updatePets(currentPets);
     state.setLastCheck(new Date());
     await state.save();
-    
-    // Send summary status to Discord
-    await broadcastCheckStatus(
-      '📊 Check Complete',
-      `${changes.adopted.length} pets adopted, ${changes.newPets.length} new pets`,
-      '#3498db'
-    );
     
     console.log('✅ Check complete\n');
   } catch (error) {
@@ -343,7 +456,7 @@ async function broadcastAdoptions(adoptionResults) {
     const embed = new EmbedBuilder()
       .setColor('#e74c3c')
       .setTitle('🎉 Pet Adopted!')
-      .setDescription(`**${pet.name}** has been adopted!`)
+      .setDescription(`**[${pet.name}](${pet.pet_url})** has been adopted!`)
       .addFields(
         { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
         { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
@@ -461,7 +574,7 @@ async function broadcastNewPets(newPets) {
   // Add pet fields
   for (const pet of petsToShow) {
     embed.addFields({
-      name: `${pet.name} (${pet.pet_id})`,
+      name: `[${pet.name}](${pet.pet_url}) ([${pet.pet_id}](${pet.pet_url}))`,
       value: `${pet.breed || 'Unknown breed'} • ${pet.animal_type || 'Unknown'} • ${pet.age || 'Unknown age'}`,
       inline: false
     });
