@@ -70,8 +70,8 @@ bot.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   
   // ============ PET ID LOOKUP FEATURE ============
-  // Check for pet ID mentions (A2XXXXXX format) anywhere in the message
-  const petIdRegex = /A2\d{6}/g;
+  // Check for pet ID mentions (A1XXXXXX or A2XXXXXX format) anywhere in the message
+  const petIdRegex = /A[12]\d{6}/g;
   const petIds = message.content.match(petIdRegex);
   
   if (petIds) {
@@ -80,9 +80,11 @@ bot.on('messageCreate', async (message) => {
     
     for (const petId of uniquePetIds) {
       try {
+        console.log(`🔍 Pet lookup: ${petId}`);
         const pet = await db.getPetById(petId);
         
         if (pet) {
+          console.log(`✅ Found pet: ${pet.name} (${petId})`);
           // Calculate days on roster
           let daysOnRoster = 'N/A';
           if (pet.brought_to_shelter) {
@@ -242,9 +244,13 @@ bot.on('messageCreate', async (message) => {
               }
             });
           }
+        } else {
+          console.log(`❌ Pet not found: ${petId}`);
+          await message.reply(`❌ Pet **${petId}** not found in database.`, { allowedMentions: { repliedUser: false } });
         }
       } catch (error) {
         console.error(`Error looking up pet ${petId}:`, error);
+        await message.reply(`❌ Error looking up pet **${petId}**: ${error.message}`, { allowedMentions: { repliedUser: false } });
       }
     }
   }
