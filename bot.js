@@ -100,14 +100,14 @@ bot.on('messageCreate', async (message) => {
           // Create pet card embed with hyperlinked title and ID
           const petCard = new EmbedBuilder()
             .setColor(pet.status === 'available' ? '#2ecc71' : '#95a5a6')
-            .setTitle(`[${pet.name}](${pet.pet_url})`)
-            .setDescription(`**ID:** [${pet.pet_id}](${pet.pet_url})`)
+            .setTitle(`${pet.name}`)
+            .setDescription(`${statusEmoji} ${pet.status === 'available' ? 'Available' : 'Adopted'}`)
             .addFields(
+              { name: 'ID', value: `[${pet.pet_id}](${pet.pet_url})`, inline: true },
               { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
               { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
               { name: 'Gender', value: pet.gender || 'Unknown', inline: true },
               { name: 'Age', value: pet.age || 'Unknown', inline: true },
-              { name: 'Status', value: `${statusEmoji} ${pet.status}`, inline: true },
               { name: 'Days in Shelter', value: String(daysOnRoster), inline: true }
             )
             .setTimestamp();
