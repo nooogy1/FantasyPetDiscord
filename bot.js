@@ -348,6 +348,14 @@ async function runCheck() {
     const currentPets = await db.getAllPets();
     const previousPets = state.getPets();
     
+    // On first run (empty state), just initialize without broadcasting
+    if (previousPets.length === 0 && state.getStatistics().totalChecks === 0) {
+      console.log('🆕 First run detected - initializing state without broadcasting');
+      state.updatePets(currentPets);
+      await state.save();
+      return;
+    }
+    
     // Detect changes
     const changes = detectChanges(previousPets, currentPets);
     
@@ -574,7 +582,7 @@ async function broadcastNewPets(newPets) {
   // Add pet fields
   for (const pet of petsToShow) {
     embed.addFields({
-      name: `[${pet.name}](${pet.pet_url}) ([${pet.pet_id}](${pet.pet_url}))`,
+      name: `[${pet.name}](${pet.pet_url}) - ${pet.pet_id}`,
       value: `${pet.breed || 'Unknown breed'} • ${pet.animal_type || 'Unknown'} • ${pet.age || 'Unknown age'}`,
       inline: false
     });
