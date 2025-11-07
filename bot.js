@@ -9,6 +9,7 @@ const Database = require('./lib/Database');
 const StateManager = require('./lib/StateManager');
 const CommandHandler = require('./lib/CommandHandler');
 const FilterHandler = require('./lib/FilterHandler');
+const QueueManager = require('./lib/QueueManager');
 require('dotenv').config();
 
 // ============ CONFIGURATION ============
@@ -35,6 +36,7 @@ const state = new StateManager();
 const points = new PointsManager(db, state);
 const commands = new CommandHandler(bot, db);
 const filter = new FilterHandler(bot, db, ROSTER_LIMIT);
+const queue = new QueueManager(bot, db, state);
 
 // Channel configurations (which leagues to track per channel)
 const channelConfigs = new Map(); // channelId -> { leagueId, leagueName }
@@ -62,8 +64,14 @@ bot.on('clientReady', async () => {
   // Start the hourly check cycle
   startCheckCycle();
   
+  // Start the 15-minute queue cycle
+  startQueueCycle();
+  
   // Run initial check after 10 seconds
   setTimeout(runCheck, 10000);
+  
+  // Run initial queue processing after 20 seconds
+  setTimeout(processQueues, 20000);
 });
 
 bot.on('messageCreate', async (message) => {
@@ -308,6 +316,10 @@ bot.on('messageCreate', async (message) => {
         }
         break;
         
+      case 'queue':
+        await showQueueStats(message);
+        break;
+        
       case 'help':
         await showHelp(message);
         break;
@@ -346,6 +358,39 @@ function startCheckCycle() {
   }, CHECK_INTERVAL * 60 * 1000);
 }
 
+// ============ QUEUE CYCLE ============
+
+function startQueueCycle() {
+  setInterval(async () => {
+    console.log(`\n🎯 [${new Date().toISOString()}] Processing queues...`);
+    await processQueues();
+  }, 15 * 60 * 1000); // 15 minutes
+}
+
+async function processQueues() {
+  try {
+    console.log('📋 Processing Discord queues...');
+    
+    // Get all channel configs
+    const configs = await db.getAllChannelConfigs();
+    
+    if (configs.length === 0) {
+      console.log('   ℹ️  No channels configured');
+      return;
+    }
+    
+    // Process new pet queues (per-channel, 15 min interval per channel)
+    await queue.processNewPetQueues(configs);
+    
+    // Process adoption queue (global, 15 min interval)
+    await queue.processAdoptionQueue(configs);
+    
+    console.log('✅ Queue processing complete\n');
+  } catch (error) {
+    console.error('❌ Error processing queues:', error);
+  }
+}
+
 async function runCheck() {
   try {
     console.log('🔍 Checking for pet status changes...');
@@ -381,12 +426,19 @@ async function runCheck() {
     // Process adoptions and award points
     if (changes.adopted.length > 0) {
       const adoptionResults = await points.processAdoptions(changes.adopted);
-      await broadcastAdoptions(adoptionResults);
+      
+      // Queue adoptions for announcement (don't broadcast directly)
+      await db.queueAdoptions();
+      console.log(`✅ Queued ${changes.adopted.length} adoptions for announcement`);
     }
     
-    // Announce new pets
+    // Queue new pets for announcement (per-channel)
     if (changes.newPets.length > 0) {
-      await broadcastNewPets(changes.newPets);
+      const configs = await db.getAllChannelConfigs();
+      for (const config of configs) {
+        await db.queueNewPetsForChannel(config.channel_id, config.league_id);
+      }
+      console.log(`✅ Queued ${changes.newPets.length} new pets for announcement`);
     }
     
     // Update state
@@ -779,11 +831,57 @@ async function showHelp(message) {
       { name: '!pets', value: 'Browse available pets with interactive filters', inline: false },
       { name: '!points', value: 'Show your points and which pets earned them', inline: false },
       { name: '!stats', value: 'View adoption statistics', inline: false },
+      { name: '!queue', value: 'View queue statistics (how many pets pending broadcast)', inline: false },
       { name: '!help', value: 'Show this help message', inline: false }
     )
     .setFooter({ text: 'Points are awarded automatically when your drafted pets get adopted!' });
   
   await message.reply({ embeds: [embed] });
+}
+
+async function showQueueStats(message) {
+  try {
+    const stats = await queue.getQueueStats();
+    const stateStats = state.getStatistics();
+    
+    // Find counts for each queue type
+    const newPetCount = stats.find(s => s.queue_type === 'new_pet')?.pending_count || '0';
+    const adoptionCount = stats.find(s => s.queue_type === 'adoption')?.pending_count || '0';
+    
+    const embed = new EmbedBuilder()
+      .setColor('#3498db')
+      .setTitle('📊 Queue Statistics')
+      .setDescription('Current status of announcement queues')
+      .addFields(
+        { 
+          name: '🆕 New Pet Queue', 
+          value: `${newPetCount} pets pending broadcast`, 
+          inline: true 
+        },
+        { 
+          name: '🎉 Adoption Queue', 
+          value: `${adoptionCount} adoptions pending broadcast`, 
+          inline: true 
+        },
+        {
+          name: '\u200b',
+          value: '\u200b',
+          inline: false
+        },
+        {
+          name: '⏱️ Queue Timing',
+          value: 'Posts are staggered every 15 minutes to prevent spam',
+          inline: false
+        }
+      )
+      .setFooter({ text: 'Queues are processed automatically every 15 minutes' })
+      .setTimestamp();
+    
+    await message.reply({ embeds: [embed] });
+  } catch (error) {
+    console.error('Error showing queue stats:', error);
+    await message.reply('❌ Error fetching queue statistics.');
+  }
 }
 
 // ============ UTILITY FUNCTIONS ============
