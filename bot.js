@@ -2,6 +2,7 @@
 // This bot runs 24/7, checks for adopted pets hourly, and awards points
 // UPDATED: Auto-displays pet cards for A2XXXXXX mentions
 // UPDATED: Shows leaderboard after adoptions
+// UPDATED: Posts errors to debug channel only
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const PointsManager = require('./lib/PointsManager');
@@ -17,6 +18,7 @@ require('dotenv').config();
 const CHECK_INTERVAL = process.env.CHECK_INTERVAL || 60; // minutes
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DEFAULT_NOTIFICATION_CHANNEL = process.env.DEFAULT_CHANNEL_ID;
+const DEBUG_CHANNEL_ID = process.env.DEBUG_CHANNEL_ID;
 const ROSTER_LIMIT = parseInt(process.env.ROSTER_LIMIT || '10'); // max pets per roster
 
 // ============ INITIALIZATION ============
@@ -388,6 +390,7 @@ async function processQueues() {
     console.log('✅ Queue processing complete\n');
   } catch (error) {
     console.error('❌ Error processing queues:', error);
+    await broadcastError('Queue Processing Error', error.message, error.stack);
   }
 }
 
@@ -449,7 +452,7 @@ async function runCheck() {
     console.log('✅ Check complete\n');
   } catch (error) {
     console.error('❌ Error during check:', error);
-    await broadcastCheckStatus('❌ Check Failed', error.message, '#e74c3c');
+    await broadcastError('Adoption Check Error', error.message, error.stack);
   }
 }
 
@@ -479,6 +482,34 @@ function detectChanges(previousPets, currentPets) {
 }
 
 // ============ DISCORD BROADCASTS ============
+
+async function broadcastError(title, description, stack = '') {
+  if (!DEBUG_CHANNEL_ID) {
+    console.warn('⚠️  DEBUG_CHANNEL_ID not set, error not posted to Discord');
+    return;
+  }
+
+  try {
+    const embed = new EmbedBuilder()
+      .setColor('#e74c3c')
+      .setTitle(`❌ ${title}`)
+      .setDescription(description)
+      .setTimestamp();
+
+    if (stack) {
+      // Truncate stack if too long (Discord has 1024 char limit per field)
+      const truncatedStack = stack.length > 1000 ? stack.substring(0, 1000) + '...' : stack;
+      embed.addFields({ name: 'Stack Trace', value: `\`\`\`${truncatedStack}\`\`\`` });
+    }
+
+    const channel = await bot.channels.fetch(DEBUG_CHANNEL_ID);
+    if (channel) {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (error) {
+    console.error('Failed to send error to debug channel:', error.message);
+  }
+}
 
 async function broadcastCheckStatus(title, description, color) {
   const embed = new EmbedBuilder()
