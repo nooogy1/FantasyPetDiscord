@@ -1,8 +1,10 @@
-// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v2)
+// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v4)
 // This bot runs 24/7, checks for adopted pets hourly, and awards points
 // UPDATED: Auto-displays pet cards for A2XXXXXX mentions
 // UPDATED: Shows leaderboard after adoptions
 // UPDATED: Posts errors to debug channel only
+// UPDATED: Detects if pet is drafted by ANYONE in league, not just current user
+// UPDATED: Button state is shared - any user can click, updates for everyone on successful draft
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const PointsManager = require('./lib/PointsManager');
@@ -95,6 +97,10 @@ bot.on('messageCreate', async (message) => {
         
         if (pet) {
           console.log(`✅ Found pet: ${pet.name} (${petId})`);
+          
+          // Get league for this channel
+          const channelLeagueId = channelConfigs.get(message.channel.id)?.leagueId;
+          
           // Calculate days on roster
           let daysOnRoster = 'N/A';
           if (pet.brought_to_shelter) {
@@ -104,14 +110,45 @@ bot.on('messageCreate', async (message) => {
             daysOnRoster = Math.max(0, Math.floor(diff / (1000 * 60 * 60 * 24)));
           }
           
-          // Determine status emoji
-          const statusEmoji = pet.status === 'available' ? '✅' : '🏠';
+          // Check if pet is drafted by ANYONE in this league
+          let isDraftedByAnyone = false;
+          let draftedByUser = null;
+          if (channelLeagueId) {
+            const query = `
+              SELECT u.first_name
+              FROM roster_entries re
+              JOIN users u ON u.id = re.user_id
+              WHERE re.pet_id = (SELECT id FROM pets WHERE pet_id = $1)
+              AND re.league_id = $2
+              LIMIT 1
+            `;
+            const result = await db.pool.query(query, [petId, channelLeagueId]);
+            if (result.rows.length > 0) {
+              isDraftedByAnyone = true;
+              draftedByUser = result.rows[0].first_name;
+            }
+          }
+          
+          // Determine status emoji and text
+          let statusEmoji = '✅';
+          let statusText = 'Available';
+          let cardColor = '#2ecc71';
+          
+          if (pet.status !== 'available') {
+            statusEmoji = '🏠';
+            statusText = 'Adopted';
+            cardColor = '#95a5a6';
+          } else if (isDraftedByAnyone) {
+            statusEmoji = '📋';
+            statusText = `Already Drafted by ${draftedByUser}`;
+            cardColor = '#f39c12'; // Orange for drafted
+          }
           
           // Create pet card embed with hyperlinked title and ID
           const petCard = new EmbedBuilder()
-            .setColor(pet.status === 'available' ? '#2ecc71' : '#95a5a6')
+            .setColor(cardColor)
             .setTitle(`${pet.name}`)
-            .setDescription(`${statusEmoji} ${pet.status === 'available' ? 'Available' : 'Adopted'}`)
+            .setDescription(`${statusEmoji} ${statusText}`)
             .addFields(
               { name: 'ID', value: `[${pet.pet_id}](${pet.pet_url})`, inline: true },
               { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
@@ -132,23 +169,40 @@ bot.on('messageCreate', async (message) => {
             petCard.setFooter({ text: `Source: ${pet.source}` });
           }
           
-          // Create adopt button if pet is available
+          // Create buttons based on pet status
           let components = [];
-          if (pet.status === 'available') {
+          if (pet.status === 'available' && !isDraftedByAnyone) {
+            // Available and not drafted - show active draft button
             const { ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
-            const adoptButton = new ButtonBuilder()
-              .setCustomId(`adopt_${petId}_${message.channel.id}`)
-              .setLabel('🐾 Adopt to Roster')
+            const draftButton = new ButtonBuilder()
+              .setCustomId(`draft_${petId}_${message.channel.id}`)
+              .setLabel('🐾 Draft')
               .setStyle(ButtonStyle.Success);
             
-            components = [new ActionRowBuilder().addComponents(adoptButton)];
+            components = [new ActionRowBuilder().addComponents(draftButton)];
+          } else if (isDraftedByAnyone || pet.status !== 'available') {
+            // Already drafted or adopted - show greyed out button
+            const { ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
+            let buttonLabel = 'Already Drafted';
+            if (pet.status !== 'available') {
+              buttonLabel = '🏠 Already Adopted';
+            }
+            
+            const disabledButton = new ButtonBuilder()
+              .setCustomId('pet_unavailable')
+              .setLabel(buttonLabel)
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(true);
+            
+            components = [new ActionRowBuilder().addComponents(disabledButton)];
           }
           
           const reply = await message.reply({ embeds: [petCard], components, allowedMentions: { repliedUser: false }, fetchReply: true });
           
-          // Set up button collector if available
-          if (pet.status === 'available') {
-            const buttonFilter = (interaction) => interaction.customId === `adopt_${petId}_${message.channel.id}`;
+          // Set up button collector only if pet is available and not drafted
+          if (pet.status === 'available' && !isDraftedByAnyone) {
+            // Filter accepts ANY user clicking this button
+            const buttonFilter = (interaction) => interaction.customId === `draft_${petId}_${message.channel.id}`;
             const buttonCollector = reply.createMessageComponentCollector({ filter: buttonFilter, time: 600000 }); // 10 minutes
             
             buttonCollector.on('collect', async (interaction) => {
@@ -180,7 +234,7 @@ bot.on('messageCreate', async (message) => {
                   return;
                 }
                 
-                // Check if already drafted
+                // Check if YOU already drafted this pet
                 if (roster.some(r => r.pet_id === petId)) {
                   await interaction.reply({
                     content: `❌ You've already drafted **[${pet.name}](${pet.pet_url})** in this league.`,
@@ -189,10 +243,26 @@ bot.on('messageCreate', async (message) => {
                   return;
                 }
                 
+                // BACKEND VALIDATION: Check if ANYONE has drafted this pet (catches button bypass attempts)
+                const draftCheckQuery = `
+                  SELECT COUNT(*) as count
+                  FROM roster_entries re
+                  WHERE re.pet_id = (SELECT id FROM pets WHERE pet_id = $1)
+                  AND re.league_id = $2
+                `;
+                const draftCheckResult = await db.pool.query(draftCheckQuery, [petId, channelLeagueId]);
+                if (draftCheckResult.rows[0].count > 0) {
+                  await interaction.reply({
+                    content: `❌ **[${pet.name}](${pet.pet_url})** has already been drafted by someone else in this league.`,
+                    ephemeral: true
+                  });
+                  return;
+                }
+                
                 // Draft the pet
                 await db.draftPet(user.id, channelLeagueId, pet.id);
                 
-                // Send confirmation
+                // Send confirmation to the clicker
                 const confirmEmbed = new EmbedBuilder()
                   .setColor('#2ecc71')
                   .setTitle('✅ Pet Drafted!')
@@ -203,7 +273,7 @@ bot.on('messageCreate', async (message) => {
                     { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
                     { name: 'Roster', value: `${roster.length + 1}/${ROSTER_LIMIT}`, inline: true }
                   )
-                  .setFooter({ text: 'You\'ll earn points if this pet gets adopted!' })
+                  .setFooter({ text: 'You\'ll earn points when this pet gets adopted!' })
                   .setTimestamp();
                 
                 if (pet.photo_url) {
@@ -212,7 +282,41 @@ bot.on('messageCreate', async (message) => {
                 
                 await interaction.reply({ embeds: [confirmEmbed] });
                 
-                // Broadcast to channel
+                // UPDATE PET CARD FOR EVERYONE - grey out the button
+                const { ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
+                const draftedButton = new ButtonBuilder()
+                  .setCustomId('pet_drafted')
+                  .setLabel('Already Drafted')
+                  .setStyle(ButtonStyle.Secondary)
+                  .setDisabled(true);
+                
+                const updatedComponents = [new ActionRowBuilder().addComponents(draftedButton)];
+                
+                const updatedPetCard = new EmbedBuilder()
+                  .setColor('#f39c12')
+                  .setTitle(`${pet.name}`)
+                  .setDescription(`📋 Already Drafted by ${interaction.user.username}`)
+                  .addFields(
+                    { name: 'ID', value: `[${pet.pet_id}](${pet.pet_url})`, inline: true },
+                    { name: 'Breed', value: pet.breed || 'Unknown', inline: true },
+                    { name: 'Type', value: pet.animal_type || 'Unknown', inline: true },
+                    { name: 'Gender', value: pet.gender || 'Unknown', inline: true },
+                    { name: 'Age', value: pet.age || 'Unknown', inline: true },
+                    { name: 'Days in Shelter', value: String(daysOnRoster), inline: true }
+                  )
+                  .setTimestamp();
+                
+                if (pet.photo_url) {
+                  updatedPetCard.setImage(pet.photo_url);
+                }
+                
+                if (pet.source) {
+                  updatedPetCard.setFooter({ text: `Source: ${pet.source}` });
+                }
+                
+                await reply.edit({ embeds: [updatedPetCard], components: updatedComponents });
+                
+                // Broadcast to channel that pet was drafted
                 const league = await db.getLeagueById(channelLeagueId);
                 const petCard2 = new EmbedBuilder()
                   .setColor('#2ecc71')
@@ -230,28 +334,22 @@ bot.on('messageCreate', async (message) => {
                 }
                 
                 await message.channel.send({ embeds: [petCard2] });
+                
+                // Stop collecting after successful draft
+                buttonCollector.stop();
+                
               } catch (error) {
-                console.error('Error in pet lookup adopt:', error);
+                console.error('Error in pet lookup draft:', error);
                 await interaction.reply({
-                  content: '❌ Error adopting pet. Please try again.',
+                  content: '❌ Error drafting pet. Please try again.',
                   ephemeral: true
                 });
               }
             });
             
             buttonCollector.on('end', async () => {
-              try {
-                const { ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
-                const disabledButton = new ButtonBuilder()
-                  .setCustomId('adopt_disabled')
-                  .setLabel('🐾 Adopt to Roster')
-                  .setStyle(ButtonStyle.Success)
-                  .setDisabled(true);
-                
-                await reply.edit({ components: [new ActionRowBuilder().addComponents(disabledButton)] });
-              } catch (e) {
-                // Message might be deleted
-              }
+              // Nothing to do - if draft was successful, already updated and stopped
+              // If timeout, button will naturally expire
             });
           }
         } else {
