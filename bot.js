@@ -1,6 +1,6 @@
-// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v6)
+// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v7)
 // This bot runs 24/7, checks for adopted pets hourly, and awards points
-// UPDATED: Now uses cached Discord photos for adoption embeds
+// UPDATED: Simplified queue - announces COMPLETE pets (name + photo), including when they become complete
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const PointsManager = require('./lib/PointsManager');
@@ -480,8 +480,8 @@ async function processQueues() {
       return;
     }
     
-    // Process new pet queues (per-channel, 15 min interval per channel)
-    await queue.processNewPetQueues(configs);
+    // Process pet queues (per-channel, 15 min interval per channel)
+    await queue.processPetQueues(configs);
     
     // Process adoption queue (global, 15 min interval)
     await queue.processAdoptionQueue(configs);
@@ -509,12 +509,10 @@ async function runCheck() {
       return;
     }
     
-    // Detect changes - now includes completedPets
+    // Detect changes
     const changes = detectChanges(previousPets, currentPets);
     
-    if (changes.adopted.length === 0 && 
-        changes.newPets.length === 0 && 
-        changes.completedPets.length === 0) {
+    if (changes.adopted.length === 0 && changes.newPets.length === 0) {
       console.log('✅ No changes detected');
       state.updatePets(currentPets);
       await state.save();
@@ -525,8 +523,7 @@ async function runCheck() {
     
     console.log(`📊 Changes detected:`);
     console.log(`   - ${changes.adopted.length} pets adopted`);
-    console.log(`   - ${changes.newPets.length} new pets available`);
-    console.log(`   - ${changes.completedPets.length} pets now complete`);
+    console.log(`   - ${changes.newPets.length} new/complete pets available`);
     
     // Process adoptions and award points
     if (changes.adopted.length > 0) {
@@ -537,28 +534,19 @@ async function runCheck() {
       console.log(`✅ Queued ${changes.adopted.length} adoptions for announcement`);
     }
     
-    // Queue new pets for announcement (per-channel)
+    // Queue new/complete pets for announcement (per-channel)
     if (changes.newPets.length > 0) {
       const configs = await db.getAllChannelConfigs();
       for (const config of configs) {
-        await db.queueNewPetsForChannel(config.channel_id, config.league_id);
+        await db.queuePetsForChannel(config.channel_id, config.league_id);
       }
-      console.log(`✅ Queued ${changes.newPets.length} new pets for announcement`);
+      console.log(`✅ Queued ${changes.newPets.length} complete pets for announcement`);
       
       // Cache photos for new pets
-      console.log(`📸 Caching photos for ${changes.newPets.length} new pets...`);
+      console.log(`📸 Caching photos for ${changes.newPets.length} pets...`);
       for (const pet of changes.newPets) {
         await photoCache.cachePhotoIfNeeded(pet);
       }
-    }
-    
-    // Queue completed pets for announcement (per-channel)
-    if (changes.completedPets.length > 0) {
-      const configs = await db.getAllChannelConfigs();
-      for (const config of configs) {
-        await db.queueCompletedPetsForChannel(config.channel_id, config.league_id);
-      }
-      console.log(`✅ Queued ${changes.completedPets.length} completed pets for announcement`);
     }
     
     // Update state
@@ -579,9 +567,15 @@ function detectChanges(previousPets, currentPets) {
   
   const adopted = [];
   const newPets = [];
-  const completedPets = [];  // NEW: Pets that just became complete
   
   const STOCK_PHOTO = 'https://24petconnect.com/Content/Images/No_pic_t.jpg';
+  
+  // Helper: Check if a pet is complete (has name + real photo)
+  const isComplete = (pet) => {
+    return (pet.name && pet.name !== '') &&
+           (pet.photo_url && pet.photo_url !== '' &&
+            pet.photo_url !== STOCK_PHOTO);
+  };
   
   // Find adopted pets (was available, now removed)
   for (const [petId, prevPet] of prevMap) {
@@ -591,38 +585,31 @@ function detectChanges(previousPets, currentPets) {
     }
   }
   
-  // Find new pets (never seen before)
+  // Find new pets that are COMPLETE (never seen before AND has name + photo)
   for (const [petId, currPet] of currMap) {
-    if (!prevMap.has(petId) && currPet.status === 'available') {
+    if (!prevMap.has(petId) && currPet.status === 'available' && isComplete(currPet)) {
       newPets.push(currPet);
     }
   }
   
-  // Find pets that just became complete (were incomplete, now have name + photo)
+  // Find pets that BECAME COMPLETE (was incomplete, now complete, not yet announced)
   for (const [petId, prevPet] of prevMap) {
     const currPet = currMap.get(petId);
     
     if (!currPet) continue;  // Pet disappeared
     if (currPet.status !== 'available') continue;  // Only track available pets
-    if (currPet.discord_available_posted) continue;  // Already posted once
+    if (currPet.discord_available_posted) continue;  // Already announced
     
     // Check if pet was INCOMPLETE before but is now COMPLETE
-    const wasIncomplete = 
-      (!prevPet.name || prevPet.name === '') &&
-      (!prevPet.photo_url || prevPet.photo_url === '' || 
-       prevPet.photo_url === STOCK_PHOTO);
-    
-    const isNowComplete = 
-      (currPet.name && currPet.name !== '') &&
-      (currPet.photo_url && currPet.photo_url !== '' &&
-       currPet.photo_url !== STOCK_PHOTO);
+    const wasIncomplete = !isComplete(prevPet);
+    const isNowComplete = isComplete(currPet);
     
     if (wasIncomplete && isNowComplete) {
-      completedPets.push(currPet);
+      newPets.push(currPet);
     }
   }
   
-  return { adopted, newPets, completedPets };
+  return { adopted, newPets };
 }
 
 // ============ DISCORD BROADCASTS ============
@@ -1021,8 +1008,7 @@ async function showQueueStats(message) {
     const stateStats = state.getStatistics();
     
     // Find counts for each queue type
-    const newPetCount = stats.find(s => s.queue_type === 'new_pet')?.pending_count || '0';
-    const completedPetCount = stats.find(s => s.queue_type === 'completed_pet')?.pending_count || '0';
+    const petCount = stats.find(s => s.queue_type === 'pet')?.pending_count || '0';
     const adoptionCount = stats.find(s => s.queue_type === 'adoption')?.pending_count || '0';
     
     const embed = new EmbedBuilder()
@@ -1031,13 +1017,8 @@ async function showQueueStats(message) {
       .setDescription('Current status of announcement queues')
       .addFields(
         { 
-          name: '🆕 New Pet Queue', 
-          value: `${newPetCount} pets pending broadcast`, 
-          inline: true 
-        },
-        { 
-          name: '✨ Completed Pet Queue', 
-          value: `${completedPetCount} pets pending broadcast`, 
+          name: '🐾 Pet Queue', 
+          value: `${petCount} pets pending broadcast`, 
           inline: true 
         },
         { 
