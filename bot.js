@@ -385,7 +385,8 @@ bot.on('messageCreate', async (message) => {
         
       case 'roster':
       case 'myroster':
-        await commands.showRoster(message, channelConfigs.get(message.channel.id)?.leagueId);
+        const targetUser = message.mentions.first();
+        await commands.showRoster(message, channelConfigs.get(message.channel.id)?.leagueId, targetUser);
         break;
         
       case 'pets':
