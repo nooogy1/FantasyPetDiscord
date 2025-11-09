@@ -9,6 +9,7 @@ const StateManager = require('./lib/StateManager');
 const CommandHandler = require('./lib/CommandHandler');
 const FilterHandler = require('./lib/FilterHandler');
 const QueueManager = require('./lib/QueueManager');
+const PhotoCache = require('./lib/PhotoCache');
 require('dotenv').config();
 
 // ============ CONFIGURATION ============
@@ -17,6 +18,7 @@ const CHECK_INTERVAL = process.env.CHECK_INTERVAL || 60; // minutes
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DEFAULT_NOTIFICATION_CHANNEL = process.env.DEFAULT_CHANNEL_ID;
 const DEBUG_CHANNEL_ID = process.env.DEBUG_CHANNEL_ID;
+const PHOTO_CHANNEL_ID = process.env.PHOTO_CHANNEL_ID; // Private channel for photo caching
 const ROSTER_LIMIT = parseInt(process.env.ROSTER_LIMIT || '10'); // max pets per roster
 
 // ============ INITIALIZATION ============
@@ -37,6 +39,7 @@ const points = new PointsManager(db, state);
 const commands = new CommandHandler(bot, db);
 const filter = new FilterHandler(bot, db, ROSTER_LIMIT);
 const queue = new QueueManager(bot, db, state);
+const photoCache = new PhotoCache(bot, db, PHOTO_CHANNEL_ID);
 
 // Channel configurations (which leagues to track per channel)
 const channelConfigs = new Map(); // channelId -> { leagueId, leagueName }
@@ -540,6 +543,12 @@ async function runCheck() {
         await db.queueNewPetsForChannel(config.channel_id, config.league_id);
       }
       console.log(`✅ Queued ${changes.newPets.length} new pets for announcement`);
+      
+      // Cache photos for new pets
+      console.log(`📸 Caching photos for ${changes.newPets.length} new pets...`);
+      for (const pet of changes.newPets) {
+        await photoCache.cachePhotoIfNeeded(pet);
+      }
     }
     
     // Queue completed pets for announcement (per-channel)
