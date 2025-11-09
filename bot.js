@@ -1,6 +1,6 @@
-// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v5)
+// bot.js - Fantasy Pet League Discord Bot & Points Manager (UPDATED v6)
 // This bot runs 24/7, checks for adopted pets hourly, and awards points
-// UPDATED: Now detects when incomplete pets become "complete" (name + photo added)
+// UPDATED: Now uses cached Discord photos for adoption embeds
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const PointsManager = require('./lib/PointsManager');
@@ -158,9 +158,10 @@ bot.on('messageCreate', async (message) => {
             )
             .setTimestamp();
           
-          // Add image if available
-          if (pet.photo_url) {
-            petCard.setImage(pet.photo_url);
+          // Add image if available - prefer cached Discord URL
+          const photoUrl = pet.discord_photo_url || pet.photo_url;
+          if (photoUrl && photoUrl !== 'https://24petconnect.com/Content/Images/No_pic_t.jpg') {
+            petCard.setImage(photoUrl);
           }
           
           // Add footer with source
@@ -703,9 +704,10 @@ async function broadcastAdoptions(adoptionResults) {
         { name: 'Days in Shelter', value: `${calculateDaysSince(pet.brought_to_shelter)}`, inline: true }
       );
     
-    // Add pet image if available
-    if (pet.photo_url) {
-      embed.setImage(pet.photo_url);
+    // Add pet image - prefer cached Discord URL over original (original will be dead by adoption)
+    const photoUrl = pet.discord_photo_url || pet.photo_url;
+    if (photoUrl && photoUrl !== 'https://24petconnect.com/Content/Images/No_pic_t.jpg') {
+      embed.setImage(photoUrl);
     }
     
     // Add points awarded section
