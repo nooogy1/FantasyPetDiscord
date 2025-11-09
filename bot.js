@@ -389,7 +389,7 @@ bot.on('messageCreate', async (message) => {
         
       case 'roster':
       case 'myroster':
-        const targetUser = message.mentions.first();
+        const targetUser = message.mentions.size > 0 ? message.mentions.values().next().value : null;
         await commands.showRoster(message, channelConfigs.get(message.channel.id)?.leagueId, targetUser);
         break;
         
